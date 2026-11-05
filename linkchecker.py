@@ -231,6 +231,39 @@ class Referrer:
 
 
 @dataclass
+class Recommendation:
+    search: str
+    replace: str
+    urls: int          # distinct URLs that start with `search`
+    broken: int        # how many of those are broken now
+    pages: int         # pages that contain them
+    tests: list        # (old_url, new_url, worked, status_label)
+    verdict: str       # "recommended" or "partial"
+
+    @property
+    def score(self) -> str:
+        return f"{sum(1 for t in self.tests if t[2])}/{len(self.tests)}"
+
+
+def interleave_kinds(lc, urls: list[str]) -> list[str]:
+    """Alternate images and non-images so the sample covers both."""
+    imgs = [u for u in urls if lc_is_image(lc, u)]
+    other = [u for u in urls if not lc_is_image(lc, u)]
+    out = []
+    while imgs or other:
+        if other:
+            out.append(other.pop(0))
+        if imgs:
+            out.append(imgs.pop(0))
+    return out
+
+
+def lands_on_home(asked: str, final: str) -> bool:
+    """True when a deep URL got redirected to the home page (a soft 404)."""
+    return urlparse(asked).path not in ("", "/") and urlparse(final).path in ("", "/")
+
+
+@dataclass
 class Stats:
     pages_crawled: int = 0
     links_found: int = 0
@@ -265,6 +298,7 @@ class LinkChecker:
         self.active: dict[int, str] = {}
         self.phase = "Starting"
         self.stop = False
+        self.recommendations: list[Recommendation] = []
 
     # ── helpers ──
     def is_internal(self, url: str) -> bool:
@@ -477,6 +511,9 @@ class LinkChecker:
                     await self.check_queue.join()
                     if self.page_queue.empty() and self.check_queue.empty():
                         break
+                if self.args.recommend:
+                    self.phase = "Testing fixes"
+                    await self.build_recommendations(client)
                 self.phase = "Done"
             finally:
                 self.stop = True
@@ -485,6 +522,62 @@ class LinkChecker:
                 refresher.cancel()
                 await asyncio.gather(*workers, refresher, return_exceptions=True)
                 live.update(self.render())
+
+    # ── search-and-replace recommendations ──
+    async def build_recommendations(self, client: httpx.AsyncClient) -> None:
+        """
+        Group problem URLs by origin (scheme + host). For each origin, swap a few
+        sample URLs onto this site's origin and test them. A swap that works
+        becomes a search-and-replace recommendation.
+        """
+        site = urlparse(self.root)
+        site_origin = f"{site.scheme}://{site.netloc}"
+
+        groups: dict[str, list[str]] = defaultdict(list)
+        for url in self.referrers:
+            if self.is_internal(url):
+                continue
+            res = self.results.get(url)
+            broken = res is not None and not res.ok and not res.soft
+            if broken or is_ip_url(url):
+                p = urlparse(url)
+                groups[f"{p.scheme}://{p.netloc}"].append(url)
+
+        def problem_count(urls):
+            return sum(1 for u in urls if (r := self.results.get(u)) and not r.ok)
+
+        # Biggest groups first; skip URLs whose path is just "/" (a swap would
+        # only land on the home page, which proves nothing).
+        ranked = sorted(groups.items(), key=lambda kv: (-problem_count(kv[1]), kv[0]))
+        for origin, urls in ranked[:30]:
+            testable = [u for u in urls if urlparse(u).path not in ("", "/")]
+            if not testable:
+                continue
+            # Test broken URLs first, and mix images with pages.
+            testable.sort(key=lambda u: (bool((r := self.results.get(u)) and r.ok),
+                                         lc_is_image(self, u), u))
+            samples = interleave_kinds(self, testable)[: self.args.fix_samples]
+
+            tests: list[tuple[str, str, bool, str]] = []
+            for old in samples:
+                new = site_origin + old[len(origin):]
+                res = await self.fetch_check(client, new)
+                worked = res.ok and not lands_on_home(new, res.final_url)
+                label = "→ home page" if res.ok and not worked else res.label
+                tests.append((old, new, worked, label))
+                # Two misses in a row with no hits: this origin is not ours.
+                if len(tests) == 2 and not any(t[2] for t in tests):
+                    break
+
+            hits = sum(1 for t in tests if t[2])
+            if not hits:
+                continue
+            pages = {ref.page for u in urls for ref in self.referrers.get(u, [])}
+            self.recommendations.append(Recommendation(
+                search=origin + "/", replace=site_origin + "/",
+                urls=len(urls), broken=problem_count(urls), pages=len(pages),
+                tests=tests, verdict="recommended" if hits == len(tests) else "partial",
+            ))
 
     async def _refresh(self, live: Live):
         while True:
@@ -679,6 +772,8 @@ def report(lc: LinkChecker, interrupted: bool) -> tuple[list, list]:
         console.print(Panel(legend, title="🔎 What the statuses mean", border_style="grey50",
                             expand=False))
 
+    print_recommendations(lc)
+
     # Summary
     s = lc.stats
     elapsed = time.monotonic() - s.started
@@ -697,6 +792,49 @@ def report(lc: LinkChecker, interrupted: bool) -> tuple[list, list]:
     console.print()
     console.print(Panel(summary, title="📊 Summary", border_style="cyan", expand=False))
     return broken, soft
+
+
+BACKUP_WARNING = ("Back up your database before you run any search and replace. "
+                  "It changes every matching row at once, and you cannot undo it.")
+
+
+def wp_cli(rec: Recommendation) -> str:
+    return f"wp search-replace '{rec.search}' '{rec.replace}' --all-tables-with-prefix --dry-run"
+
+
+def print_recommendations(lc: LinkChecker) -> None:
+    if not lc.recommendations:
+        return
+    console.print()
+    console.print(Rule("[bold green]🛠  RECOMMENDATIONS[/]", style="green"))
+    console.print(Panel(f"[bold]⚠️  {BACKUP_WARNING}[/]", border_style="bold yellow"))
+
+    t = Table(box=box.ROUNDED, border_style="green", expand=True, show_lines=True,
+              header_style="bold green")
+    t.add_column("", width=3, justify="center")
+    t.add_column("Search for", overflow="fold", ratio=3)
+    t.add_column("Replace with", overflow="fold", ratio=3)
+    t.add_column("Affects", ratio=2)
+    t.add_column("Tested", justify="center", width=8)
+    for rec in lc.recommendations:
+        good = rec.verdict == "recommended"
+        affects = Text()
+        affects.append(f"{rec.urls:,} URLs", style="bold")
+        affects.append(f" on {rec.pages:,} pages\n", style="")
+        affects.append(f"{rec.broken:,} broken now", style="red" if rec.broken else "dim")
+        t.add_row(
+            "✅" if good else "⚠️ ",
+            Text(rec.search, style="bold red"),
+            Text(rec.replace, style="bold green"),
+            affects,
+            Text(rec.score + " ✓", style="bold green" if good else "bold yellow"),
+        )
+    console.print(t)
+    if any(r.verdict == "partial" for r in lc.recommendations):
+        console.print("[yellow]⚠️  = some test URLs still failed after the swap. Those files are "
+                      "probably missing on the current server. See the .mdown report for details.[/]")
+    console.print("[dim]Run each one in Better Search Replace (dry run first), "
+                  "or with WP-CLI — the commands are in the .mdown report.[/]")
 
 
 def write_reports(lc: LinkChecker, broken, soft, out: Path) -> None:
@@ -728,6 +866,11 @@ def write_reports(lc: LinkChecker, broken, soft, out: Path) -> None:
                     "found_on": [ref.page for ref in lc.referrers.get(r.url, [])]} for r in broken],
         "blocked": [{"url": r.url, "status": r.label,
                      "found_on": [ref.page for ref in lc.referrers.get(r.url, [])]} for r in soft],
+        "recommendations": [{
+            "search": rec.search, "replace": rec.replace, "verdict": rec.verdict,
+            "urls": rec.urls, "broken": rec.broken, "pages": rec.pages,
+            "tests": [{"old": o, "new": n, "worked": w, "status": s} for o, n, w, s in rec.tests],
+        } for rec in lc.recommendations],
     }, indent=2))
     md_path = out / f"{host}-{stamp}.mdown"
     md_path.write_text(markdown_report(lc, broken, soft))
@@ -757,6 +900,57 @@ def markdown_report(lc: LinkChecker, broken: list[Result], soft: list[Result]) -
         if is_ip_url(r.url):
             line += " ⚠️ _IP address_"
         return line
+
+    def recommendations_section() -> list[str]:
+        recs = lc.recommendations
+        if not recs:
+            return []
+        lines = [
+            "## RECOMMENDATIONS", "",
+            f"> ⚠️ **{BACKUP_WARNING}**", "",
+            "Each fix below swaps an old address for your site's address. "
+            "The checker tried the swap on sample URLs and requested the new URLs to see if they work.",
+            "",
+            "Run each fix in Tools › Better Search Replace. Leave **Run as dry run** on the first time "
+            "and check the row count. Then run it for real.",
+            "",
+            "- [ ] Back up the database",
+        ]
+        for rec in recs:
+            good = rec.verdict == "recommended"
+            lines += [
+                "",
+                f"### {'✅' if good else '⚠️'} `{rec.search}` → `{rec.replace}`",
+                "",
+                f"Affects {rec.urls:,} URLs on {rec.pages:,} pages. Broken now: {rec.broken:,}.",
+                "",
+                f"| Search for | Replace with |",
+                "| --- | --- |",
+                f"| `{rec.search}` | `{rec.replace}` |",
+                "",
+                f"Tested {len(rec.tests)} sample URLs with the new address: "
+                f"**{rec.score} worked**.",
+                "",
+            ]
+            for old, new, worked, status in rec.tests:
+                lines.append(f"- {'✅' if worked else '❌'} **{md_escape(status)}** `{new}`")
+            if not good:
+                lines += ["", "Some samples still fail after the swap. The files are probably "
+                          "missing on the current server. Run the replace anyway, then upload "
+                          "the missing files. The next linkchecker run lists them."]
+            lines += [
+                "",
+                "WP-CLI (remove `--dry-run` to apply):",
+                "",
+                "```",
+                wp_cli(rec),
+                "```",
+                "",
+                f"- [ ] Dry run `{rec.search}` → `{rec.replace}`",
+                f"- [ ] Run it for real",
+            ]
+        lines += ["", "- [ ] Run linkchecker again to confirm", ""]
+        return lines
 
     def ip_section() -> list[str]:
         ip_urls = sorted(u for u in lc.referrers if is_ip_url(u))
@@ -829,6 +1023,7 @@ def markdown_report(lc: LinkChecker, broken: list[Result], soft: list[Result]) -
         "#linkchecker",
         "",
     ]
+    out += recommendations_section()
     if broken or soft:
         out += ["## What the statuses mean", "", "| Status | Meaning |", "| --- | --- |"]
         out += [f"| **{label}** | {text} |" for label, text in legend_rows(broken + soft)]
@@ -895,6 +1090,10 @@ def main():
                     help="do not seed the crawl from sitemap.xml")
     ap.add_argument("-x", "--exclude", action="append", metavar="REGEX",
                     help="skip URLs that match this regex (repeatable)")
+    ap.add_argument("--no-recommend", dest="recommend", action="store_false",
+                    help="skip testing search-and-replace fixes")
+    ap.add_argument("--fix-samples", type=int, default=5, metavar="N",
+                    help="sample URLs to test for each search-and-replace fix (default 5)")
     ap.add_argument("--show-blocked", action="store_true",
                     help="also list links that returned 401/403/429 or timed out")
     ap.add_argument("-o", "--out", default="reports", help="folder for CSV/JSON reports")

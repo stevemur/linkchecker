@@ -16,6 +16,7 @@ uv run linkchecker.py https://example.com
 - **Checks every link it finds,** on your site and on other sites.
 - **Finds missing images everywhere they hide:** `<img src>`, every size in `srcset`, lazy-load attributes (`data-src`, `data-lazy-src`, `data-srcset`), `og:image` and `twitter:image` tags, and links that point at image files.
 - **Flags URLs that use an IP address** (for example `http://203.0.113.7/wp-content/...`) and gives you the fixed URL. These links break when the server moves, and they fail HTTPS checks.
+- **Recommends search-and-replace fixes, and tests them first.** See [Recommendations](#recommendations).
 - **Keeps "blocked" apart from "broken."** Sites like LinkedIn and Amazon refuse automated requests with 401, 403, 429, or 999. Those links usually work in a browser, so the tool lists them for a check by hand.
 - **Spots WordPress maintenance mode** before it starts, so you don't get a report full of false errors.
 - **Is polite to other sites.** It sends at most 3 requests at a time to any outside host, and it tries a light `HEAD` request before a full `GET`.
@@ -53,6 +54,28 @@ The checklist looks like this:
 
 To use it in [Bear](https://bear.app), drag the `.mdown` file into Bear or use File › Import. The note gets the `#linkchecker` tag.
 
+## Recommendations
+
+Many broken links share one cause: an old address. That might be the IP address of a server you moved away from, or a domain you no longer use. One search and replace can fix all of them at once.
+
+After the crawl, linkchecker:
+
+1. Groups the broken links and IP-address links by their start, for example `http://203.0.113.7/`.
+2. Swaps that start for your site's address in a few sample URLs (5 by default).
+3. Requests each new URL to see if it works. A URL that only redirects to your home page does not count.
+4. Recommends the swap if the samples work.
+
+| Mark | Meaning |
+|---|---|
+| ✅ | Every sample worked. Safe to run. |
+| ⚠️ | Some samples worked. Run it, then upload the files that are still missing. |
+
+Groups where no sample works get no recommendation. That is usually a dead outside site.
+
+The terminal shows a RECOMMENDATIONS table. The `.mdown` checklist has a RECOMMENDATIONS section near the top. For each fix it shows the search and replace strings, the sample results, a WP-CLI command, and checkboxes for the dry run and the real run.
+
+> ⚠️ **Back up your database before you run any search and replace.** It changes every matching row at once, and you cannot undo it.
+
 ## Fixing IP-address links in WordPress
 
 IP-address links usually come from a server move. Posts written on the old server kept its address in their links and image URLs. When the old server shuts down, those images and links break.
@@ -81,6 +104,8 @@ If you use [WP-CLI](https://wp-cli.org/), `wp search-replace 'http://203.0.113.7
 | `--no-external` | Check only links on your own site |
 | `--no-sitemap` | Don't read the sitemap; only follow links |
 | `-x, --exclude REGEX` | Skip URLs that match. You can repeat it. |
+| `--no-recommend` | Skip testing search-and-replace fixes |
+| `--fix-samples N` | Sample URLs to test for each fix (default 5) |
 | `--show-blocked` | Also list blocked and timed-out links in the terminal |
 | `-o, --out DIR` | Folder for reports (default `reports`) |
 | `--no-report` | Don't save report files |
