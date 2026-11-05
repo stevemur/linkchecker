@@ -2,6 +2,8 @@
 
 A colorful terminal tool that crawls a website and finds broken links, missing images, and links that use a bare IP address. It saves a checklist you can work through in Bear or any Markdown app.
 
+![linkchecker crawling a site: counters for pages, links, OK, broken, and blocked; a progress bar; the requests in flight; and a list of broken links with the pages they appear on](linkchecker.png)
+
 It is one Python file. Run it with [uv](https://docs.astral.sh/uv/) and there is nothing to install.
 
 ```zsh
