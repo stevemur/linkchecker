@@ -53,6 +53,24 @@ The checklist looks like this:
 
 To use it in [Bear](https://bear.app), drag the `.mdown` file into Bear or use File › Import. The note gets the `#linkchecker` tag.
 
+## Fixing IP-address links in WordPress
+
+IP-address links usually come from a server move. Posts written on the old server kept its address in their links and image URLs. When the old server shuts down, those images and links break.
+
+You can fix all of them at once with the free [Better Search Replace](https://wordpress.org/plugins/better-search-replace/) plugin:
+
+1. **Back up your database first.** A search-and-replace changes every matching row, and you can't undo it.
+2. In WordPress, go to Tools › Better Search Replace.
+3. In **Search for**, type the old address, for example `http://203.0.113.7`. In **Replace with**, type your site address, for example `https://example.com`.
+4. Select the tables to change. `wp_posts` holds post content. `wp_postmeta` holds some image data.
+5. Leave **Run as dry run** turned on and run it. Check how many rows it would change.
+6. If the numbers look right, turn off dry run and run it again.
+7. Repeat for each IP address in the report. If any links use `https://` with the IP, search for that form too.
+
+Then run linkchecker again. The IP-address section should be empty. The fix works only if the files also exist on your current server. Any image that wasn't copied over during the move will now show up as a missing image, and you'll need to upload it again.
+
+If you use [WP-CLI](https://wp-cli.org/), `wp search-replace 'http://203.0.113.7' 'https://example.com' --dry-run` does the same job from the command line.
+
 ## Options
 
 | Option | What it does |
