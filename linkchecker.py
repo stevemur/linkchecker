@@ -145,6 +145,65 @@ class LinkExtractor(HTMLParser):
             self._a_index = None
 
 
+# ──────────────────────────── Status meanings ────────────────────────────
+
+def error_label(e: Exception) -> str:
+    """Turn a network error into a short, plain label."""
+    msg = str(e).lower()
+    if isinstance(e, httpx.TimeoutException):
+        return "TIMEOUT"
+    if isinstance(e, httpx.TooManyRedirects):
+        return "LOOP"
+    if "ssl" in msg or "certificate" in msg:
+        return "BAD SSL"
+    if isinstance(e, httpx.ConnectError):
+        if any(s in msg for s in ("nodename", "name or service", "name resolution",
+                                  "no address associated", "getaddrinfo")):
+            return "NO DOMAIN"
+        return "NO SERVER"
+    if isinstance(e, (httpx.RemoteProtocolError, httpx.ReadError)):
+        return "NO REPLY"
+    return "ERROR"
+
+
+ERROR_MEANINGS = {
+    "NO DOMAIN": "The domain name does not exist any more. It probably expired. The link is dead.",
+    "NO SERVER": "The domain exists, but no server answered at its address. Often an old server that was shut down.",
+    "TIMEOUT": "The server took too long to answer. It may be slow or down. Try it in a browser.",
+    "BAD SSL": "The site's HTTPS certificate is wrong or expired. Browsers show a security warning.",
+    "NO REPLY": "The server closed the connection without an answer.",
+    "LOOP": "The URL redirects in a circle and never lands on a page.",
+    "ERROR": "Some other network error.",
+}
+
+HTTP_MEANINGS = {
+    400: "Bad request", 401: "Login required", 403: "Forbidden (often bot blocking)",
+    404: "Not found", 405: "Method not allowed", 406: "Not acceptable",
+    410: "Gone (removed on purpose)", 429: "Too many requests (rate limited)",
+    451: "Blocked for legal reasons", 500: "Server error", 502: "Bad gateway",
+    503: "Service unavailable", 504: "Gateway timeout",
+    520: "Cloudflare: unknown error from the site", 521: "Cloudflare: the site's server is down",
+    522: "Cloudflare: the site's server did not answer", 523: "Cloudflare: the site's server is unreachable",
+    525: "Cloudflare: SSL handshake failed", 526: "Cloudflare: invalid SSL certificate",
+    999: "LinkedIn's code for blocking bots",
+}
+
+
+def meaning(label: str) -> str:
+    if label in ERROR_MEANINGS:
+        return ERROR_MEANINGS[label]
+    if label.isdigit():
+        code = int(label)
+        return HTTP_MEANINGS.get(code) or ("Server error" if code >= 500 else "Client error")
+    return ""
+
+
+def legend_rows(results) -> list[tuple[str, str]]:
+    """One (label, meaning) row for each status that appears, numbers first."""
+    labels = {r.label for r in results}
+    return [(l, meaning(l)) for l in sorted(labels, key=lambda l: (not l.isdigit(), l))]
+
+
 # ─────────────────────────────── Data types ──────────────────────────────
 
 @dataclass
@@ -277,14 +336,12 @@ class LinkChecker:
                 soft = code in SOFT_FAIL
                 return Result(url, code, ok=code < 400, soft=soft and code >= 400,
                               final_url=str(resp.url), elapsed=time.monotonic() - t0)
-            except httpx.TimeoutException:
-                last_err = "TIMEOUT"
-            except httpx.ConnectError as e:
-                last_err = "DNS" if "nodename" in str(e) or "Name or service" in str(e) else "CONNECT"
             except httpx.TooManyRedirects:
-                return Result(url, None, ok=False, error="REDIRECT LOOP")
+                return Result(url, None, ok=False, error="LOOP")
             except (httpx.HTTPError, ValueError) as e:
-                last_err = type(e).__name__.upper()[:16]
+                last_err = error_label(e)
+                if last_err in ("NO DOMAIN", "BAD SSL"):
+                    break  # retrying will not help
             await asyncio.sleep(1.0)
         # Timeouts on third-party sites are uncertain, not proof of a dead link.
         soft = last_err == "TIMEOUT" and not self.is_internal(url)
@@ -297,7 +354,7 @@ class LinkChecker:
             async with self.host_sem(url):
                 resp = await client.get(url)
         except httpx.HTTPError as e:
-            err = "TIMEOUT" if isinstance(e, httpx.TimeoutException) else type(e).__name__.upper()[:16]
+            err = error_label(e)
             if url not in self.results:
                 self.record(Result(url, None, ok=False, error=err))
             return
@@ -490,7 +547,7 @@ class LinkChecker:
 
         # Recent broken
         rb = Table(box=box.SIMPLE_HEAD, expand=True, show_edge=False, header_style="bold red")
-        rb.add_column("Status", width=10)
+        rb.add_column("Status", width=11)
         rb.add_column("Broken URL", overflow="ellipsis", no_wrap=True, ratio=3)
         rb.add_column("Found on", overflow="ellipsis", no_wrap=True, ratio=2, style="dim")
         for url, res in list(self.recent_broken):
@@ -566,7 +623,7 @@ def report(lc: LinkChecker, interrupted: bool) -> tuple[list, list]:
     def make_table(title, rows, style):
         t = Table(title=title, title_style=f"bold {style}", box=box.ROUNDED,
                   border_style=style, expand=True, show_lines=True)
-        t.add_column("Status", justify="center", width=9)
+        t.add_column("Status", justify="center", width=11)
         t.add_column("Link", overflow="fold", ratio=3)
         t.add_column("Found on", overflow="fold", ratio=3)
         for r in rows:
@@ -608,6 +665,19 @@ def report(lc: LinkChecker, interrupted: bool) -> tuple[list, list]:
     elif soft:
         console.print(f"[yellow]🤔 {len(soft)} link(s) were blocked or timed out "
                       f"(often bot protection). Use [bold]--show-blocked[/] to list them.[/]")
+
+    # Legend: what each status in the tables means.
+    shown = broken + (soft if lc.args.show_blocked else [])
+    if shown:
+        legend = Table.grid(padding=(0, 2))
+        legend.add_column(justify="right", no_wrap=True)
+        legend.add_column(style="grey70")
+        for label, text in legend_rows(shown):
+            style = status_style(next(r for r in shown if r.label == label))
+            legend.add_row(Text(label, style=style), text)
+        console.print()
+        console.print(Panel(legend, title="🔎 What the statuses mean", border_style="grey50",
+                            expand=False))
 
     # Summary
     s = lc.stats
@@ -759,6 +829,10 @@ def markdown_report(lc: LinkChecker, broken: list[Result], soft: list[Result]) -
         "#linkchecker",
         "",
     ]
+    if broken or soft:
+        out += ["## What the statuses mean", "", "| Status | Meaning |", "| --- | --- |"]
+        out += [f"| **{label}** | {text} |" for label, text in legend_rows(broken + soft)]
+        out.append("")
     if broken:
         out += section("Fix these", broken,
                        "Each heading is a page on the site. Each checkbox is one fix on that page.")
