@@ -1,0 +1,102 @@
+# linkchecker
+
+A colorful terminal tool that crawls a website and finds broken links, missing images, and links that use a bare IP address. It saves a checklist you can work through in Bear or any Markdown app.
+
+It is one Python file. Run it with [uv](https://docs.astral.sh/uv/) and there is nothing to install.
+
+```zsh
+uv run linkchecker.py https://example.com
+```
+
+## What it does
+
+- **Crawls the whole site.** It starts from the home page and the sitemap (`sitemap.xml`, `sitemap_index.xml`, `wp-sitemap.xml`), then follows every link on the site.
+- **Checks every link it finds,** on your site and on other sites.
+- **Finds missing images everywhere they hide:** `<img src>`, every size in `srcset`, lazy-load attributes (`data-src`, `data-lazy-src`, `data-srcset`), `og:image` and `twitter:image` tags, and links that point at image files.
+- **Flags URLs that use an IP address** (for example `http://203.0.113.7/wp-content/...`) and gives you the fixed URL. These links break when the server moves, and they fail HTTPS checks.
+- **Keeps "blocked" apart from "broken."** Sites like LinkedIn and Amazon refuse automated requests with 401, 403, 429, or 999. Those links usually work in a browser, so the tool lists them for a check by hand.
+- **Spots WordPress maintenance mode** before it starts, so you don't get a report full of false errors.
+- **Is polite to other sites.** It sends at most 3 requests at a time to any outside host, and it tries a light `HEAD` request before a full `GET`.
+
+## The live view
+
+While it runs, you see counters for pages, links, OK, broken, and blocked; a progress bar; the requests in flight; and the newest broken links as it finds them.
+
+At the end, it prints a table of missing images and a table of broken links. Each row shows the pages that use the link, with the link text or image alt text, so you can find it fast.
+
+## Reports
+
+Each run saves three files to `reports/`:
+
+| File | Use |
+|---|---|
+| `site-DATE.mdown` | A checklist grouped by the page you need to edit. Each fix is a `- [ ]` checkbox. |
+| `site-DATE.csv` | One row per broken link per page. Sort and filter in a spreadsheet. |
+| `site-DATE.json` | The same data for scripts. |
+
+The checklist looks like this:
+
+```markdown
+### [My Trip to Japan](https://example.com/japan/)
+`/japan/` · 2 to fix
+
+- [ ] **404** 🖼 Missing image: [\[alt: Mount Fuji\]](https://example.com/wp-content/uploads/fuji.jpg)
+- [ ] **404** 🔗 Broken link: [Tokyo guide](https://oldsite.example/tokyo)
+
+## Links that use an IP address
+
+- [ ] **200** 🖼 image: `http://203.0.113.7/wp-content/uploads/map.png`
+    - change to: `https://example.com/wp-content/uploads/map.png`
+```
+
+To use it in [Bear](https://bear.app), drag the `.mdown` file into Bear or use File › Import. The note gets the `#linkchecker` tag.
+
+## Options
+
+| Option | What it does |
+|---|---|
+| `-c, --concurrency N` | Requests at once (default 12) |
+| `-m, --max-pages N` | Stop after N pages. Good for a quick trial run. |
+| `-t, --timeout SECS` | Timeout for each request (default 20) |
+| `--no-external` | Check only links on your own site |
+| `--no-sitemap` | Don't read the sitemap; only follow links |
+| `-x, --exclude REGEX` | Skip URLs that match. You can repeat it. |
+| `--show-blocked` | Also list blocked and timed-out links in the terminal |
+| `-o, --out DIR` | Folder for reports (default `reports`) |
+| `--no-report` | Don't save report files |
+
+Some examples:
+
+```zsh
+# Quick trial on the first 50 pages
+uv run linkchecker.py https://example.com --max-pages 50
+
+# Only your own site, and skip tag pages
+uv run linkchecker.py https://example.com --no-external -x '/tag/'
+```
+
+Press **Ctrl-C** to stop early. You still get the results so far and the report files.
+
+The tool exits with code `1` when it finds broken links and `0` when it finds none, so you can use it in a script or a scheduled job.
+
+## Requirements
+
+- Python 3.10 or later
+- [uv](https://docs.astral.sh/uv/) (recommended). It reads the dependencies from the top of the script.
+
+Without uv:
+
+```zsh
+pip install httpx rich
+python3 linkchecker.py https://example.com
+```
+
+## Limits
+
+- It reads the HTML the server sends. It does not run JavaScript, so it misses links that only scripts add.
+- It skips some WordPress URLs that are not real content: `/wp-admin`, `/wp-login.php`, `/feed`, `/wp-json`, `?replytocom=`, and `?share=`.
+- A timeout on another site counts as "check by hand," not "broken," because slow sites are common.
+
+## License
+
+MIT
