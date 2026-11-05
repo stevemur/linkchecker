@@ -7,9 +7,9 @@
 linkchecker — crawl a website and report broken links.
 
 Usage:
-    uv run linkchecker.py https://stevemurch.com
-    uv run linkchecker.py https://stevemurch.com --concurrency 20 --max-pages 200
-    uv run linkchecker.py https://stevemurch.com --no-external
+    uv run linkchecker.py https://example.com
+    uv run linkchecker.py https://example.com --concurrency 20 --max-pages 200
+    uv run linkchecker.py https://example.com --no-external
 """
 
 from __future__ import annotations
@@ -811,7 +811,7 @@ def preflight(url: str) -> bool:
 
 def main():
     ap = argparse.ArgumentParser(description="Crawl a website and report broken links.")
-    ap.add_argument("url", nargs="?", default="https://stevemurch.com", help="site root to crawl")
+    ap.add_argument("url", help="site root to crawl, e.g. https://example.com")
     ap.add_argument("-c", "--concurrency", type=int, default=12, help="parallel requests (default 12)")
     ap.add_argument("-m", "--max-pages", type=int, default=0, help="stop after N pages (0 = no limit)")
     ap.add_argument("-t", "--timeout", type=float, default=20, help="per-request timeout in seconds")
